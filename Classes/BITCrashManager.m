@@ -44,6 +44,7 @@
 #import "BITCrashManagerPrivate.h"
 #import "BITCrashReportTextFormatter.h"
 #import "BITCrashDetailsPrivate.h"
+#import "BITCrashCXXExceptionHandler.h"
 
 #include <sys/sysctl.h>
 
@@ -65,12 +66,14 @@ NSString *const kBITCrashManagerStatus = @"BITCrashManagerStatus";
 
 NSString *const kBITAppWentIntoBackgroundSafely = @"BITAppWentIntoBackgroundSafely";
 NSString *const kBITAppDidReceiveLowMemoryNotification = @"BITAppDidReceiveLowMemoryNotification";
+NSString *const kBITAppMarketingVersion = @"BITAppMarketingVersion";
 NSString *const kBITAppVersion = @"BITAppVersion";
 NSString *const kBITAppOSVersion = @"BITAppOSVersion";
 NSString *const kBITAppOSBuild = @"BITAppOSBuild";
 NSString *const kBITAppUUIDs = @"BITAppUUIDs";
 
 NSString *const kBITFakeCrashUUID = @"BITFakeCrashUUID";
+NSString *const kBITFakeCrashAppMarketingVersion = @"BITFakeCrashAppMarketingVersion";
 NSString *const kBITFakeCrashAppVersion = @"BITFakeCrashAppVersion";
 NSString *const kBITFakeCrashAppBundleIdentifier = @"BITFakeCrashAppBundleIdentifier";
 NSString *const kBITFakeCrashOSVersion = @"BITFakeCrashOSVersion";
@@ -95,6 +98,52 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   .context = NULL,
   .handleSignal = plcr_post_crash_callback
 };
+
+
+// Temporary class until PLCR catches up
+// We trick PLCR with an Objective-C exception.
+//
+// This code provides us access to the C++ exception message, including a correct stack trace.
+//
+@interface BITCrashCXXExceptionWrapperException : NSException
+- (instancetype)initWithCXXExceptionInfo:(const BITCrashUncaughtCXXExceptionInfo *)info;
+@end
+
+@implementation BITCrashCXXExceptionWrapperException {
+  const BITCrashUncaughtCXXExceptionInfo *_info;
+}
+
+- (instancetype)initWithCXXExceptionInfo:(const BITCrashUncaughtCXXExceptionInfo *)info {
+  extern char* __cxa_demangle(const char* mangled_name, char* output_buffer, size_t* length, int* status);
+  char *demangled_name = __cxa_demangle ? __cxa_demangle(info->exception_type_name ?: "", NULL, NULL, NULL) : NULL;
+
+  if ((self = [super
+                initWithName:[NSString stringWithUTF8String:demangled_name ?: info->exception_type_name ?: ""]
+                reason:[NSString stringWithUTF8String:info->exception_message ?: ""]
+                userInfo:nil])) {
+    _info = info;
+  }
+  return self;
+}
+
+- (NSArray *)callStackReturnAddresses {
+  NSMutableArray *cxxFrames = [NSMutableArray arrayWithCapacity:_info->exception_frames_count];
+  
+  for (uint32_t i = 0; i < _info->exception_frames_count; ++i) {
+    [cxxFrames addObject:[NSNumber numberWithUnsignedLongLong:_info->exception_frames[i]]];
+  }
+  return cxxFrames;
+}
+
+@end
+
+
+// C++ Exception Handler
+static void uncaught_cxx_exception_handler(const BITCrashUncaughtCXXExceptionInfo *info) {
+  // This relies on a LOT of sneaky internal knowledge of how PLCR works and should not be considered a long-term solution.
+  NSGetUncaughtExceptionHandler()([[BITCrashCXXExceptionWrapperException alloc] initWithCXXExceptionInfo:info]);
+  abort();
+}
 
 
 @implementation BITCrashManager {
@@ -127,8 +176,10 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
 - (instancetype)init {
   if ((self = [super init])) {
     _delegate = nil;
-    _showAlwaysButton = YES;
     _isSetup = NO;
+    
+    _showAlwaysButton = YES;
+    _alertViewHandler = nil;
     
     _plCrashReporter = nil;
     _exceptionHandler = nil;
@@ -141,7 +192,6 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     _didLogLowMemoryWarning = NO;
     
     _approvedCrashReports = [[NSMutableDictionary alloc] init];
-    _alertViewHandler = nil;
 
     _fileManager = [[NSFileManager alloc] init];
     _crashFiles = [[NSMutableArray alloc] init];
@@ -363,7 +413,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   NSArray *uuidArray = [BITCrashReportTextFormatter arrayOfAppUUIDsForCrashReport:report];
   
   for (NSDictionary *element in uuidArray) {
-    if ([element objectForKey:kBITBinaryImageKeyUUID] && [element objectForKey:kBITBinaryImageKeyArch] && [element objectForKey:kBITBinaryImageKeyUUID]) {
+    if ([element objectForKey:kBITBinaryImageKeyType] && [element objectForKey:kBITBinaryImageKeyArch] && [element objectForKey:kBITBinaryImageKeyUUID]) {
       [uuidString appendFormat:@"<uuid type=\"%@\" arch=\"%@\">%@</uuid>",
        [element objectForKey:kBITBinaryImageKeyType],
        [element objectForKey:kBITBinaryImageKeyArch],
@@ -475,9 +525,14 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     static dispatch_once_t predAppData;
       
     dispatch_once(&predAppData, ^{
+      id marketingVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+      if (marketingVersion && [marketingVersion isKindOfClass:[NSString class]])
+        [[NSUserDefaults standardUserDefaults] setObject:marketingVersion forKey:kBITAppMarketingVersion];
+      
       id bundleVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
       if (bundleVersion && [bundleVersion isKindOfClass:[NSString class]])
         [[NSUserDefaults standardUserDefaults] setObject:bundleVersion forKey:kBITAppVersion];
+      
       [[NSUserDefaults standardUserDefaults] setObject:[[UIDevice currentDevice] systemVersion] forKey:kBITAppOSVersion];
       [[NSUserDefaults standardUserDefaults] setObject:[self osBuild] forKey:kBITAppOSBuild];
       
@@ -528,9 +583,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
  *	@return The userID value
  */
 - (NSString *)userIDForCrashReport {
-  // first check the global keychain storage
-  NSString *userID = [self stringValueFromKeychainForKey:kBITHockeyMetaUserID] ?: @"";
-  
+  NSString *userID;
 #if HOCKEYSDK_FEATURE_AUTHENTICATOR
   // if we have an identification from BITAuthenticator, use this as a default.
   if ((
@@ -542,14 +595,19 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   }
 #endif
   
-  if ([BITHockeyManager sharedHockeyManager].delegate &&
-      [[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userIDForHockeyManager:componentManager:)]) {
-    userID = [[BITHockeyManager sharedHockeyManager].delegate
-                userIDForHockeyManager:[BITHockeyManager sharedHockeyManager]
-                componentManager:self] ?: @"";
+  // first check the global keychain storage
+  NSString *userIdFromKeychain = [self stringValueFromKeychainForKey:kBITHockeyMetaUserID];
+  if (userIdFromKeychain) {
+    userID = userIdFromKeychain;
   }
   
-  return userID;
+  if ([[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userIDForHockeyManager:componentManager:)]) {
+    userID = [[BITHockeyManager sharedHockeyManager].delegate
+                userIDForHockeyManager:[BITHockeyManager sharedHockeyManager]
+                componentManager:self];
+  }
+  
+  return userID  ?: @"";
 }
 
 /**
@@ -561,11 +619,13 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   // first check the global keychain storage
   NSString *username = [self stringValueFromKeychainForKey:kBITHockeyMetaUserName] ?: @"";
   
-  if (self.delegate && [self.delegate respondsToSelector:@selector(userNameForCrashManager:)]) {
+  if ([self.delegate respondsToSelector:@selector(userNameForCrashManager:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     username = [self.delegate userNameForCrashManager:self] ?: @"";
+#pragma clang diagnostic pop
   }
-  if ([BITHockeyManager sharedHockeyManager].delegate &&
-      [[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userNameForHockeyManager:componentManager:)]) {
+  if ([[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userNameForHockeyManager:componentManager:)]) {
     username = [[BITHockeyManager sharedHockeyManager].delegate
                 userNameForHockeyManager:[BITHockeyManager sharedHockeyManager]
                 componentManager:self] ?: @"";
@@ -595,11 +655,13 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   }
 #endif
   
-  if (self.delegate && [self.delegate respondsToSelector:@selector(userEmailForCrashManager:)]) {
+  if ([self.delegate respondsToSelector:@selector(userEmailForCrashManager:)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     useremail = [self.delegate userEmailForCrashManager:self] ?: @"";
+#pragma clang diagnostic pop
   }
-  if ([BITHockeyManager sharedHockeyManager].delegate &&
-      [[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userEmailForHockeyManager:componentManager:)]) {
+  if ([[BITHockeyManager sharedHockeyManager].delegate respondsToSelector:@selector(userEmailForHockeyManager:componentManager:)]) {
     useremail = [[BITHockeyManager sharedHockeyManager].delegate
                  userEmailForHockeyManager:[BITHockeyManager sharedHockeyManager]
                  componentManager:self] ?: @"";
@@ -657,7 +719,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     name[3] = getpid();
     
     if (sysctl(name, 4, &info, &info_size, NULL, 0) == -1) {
-      NSLog(@"[HockeySDK] ERROR: Checking for a running debugger via sysctl() failed: %s", strerror(errno));
+      NSLog(@"[HockeySDK] ERROR: Checking for a running debugger via sysctl() failed.");
       debuggerIsAttached = false;
     }
     
@@ -670,7 +732,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
 
 
 - (void)generateTestCrash {
-  if (![self isAppStoreEnvironment]) {
+  if (self.appEnvironment != BITEnvironmentAppStore) {
     
     if ([self isDebuggerAttached]) {
       NSLog(@"[HockeySDK] WARNING: The debugger is attached. The following crash cannot be detected by the SDK!");
@@ -694,12 +756,12 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   [self addStringValueToKeychain:[self userEmailForCrashReport] forKey:[NSString stringWithFormat:@"%@.%@", filename, kBITCrashMetaUserEmail]];
   [self addStringValueToKeychain:[self userIDForCrashReport] forKey:[NSString stringWithFormat:@"%@.%@", filename, kBITCrashMetaUserID]];
   
-  if (self.delegate != nil && [self.delegate respondsToSelector:@selector(applicationLogForCrashManager:)]) {
+  if ([self.delegate respondsToSelector:@selector(applicationLogForCrashManager:)]) {
     applicationLog = [self.delegate applicationLogForCrashManager:self] ?: @"";
   }
   [metaDict setObject:applicationLog forKey:kBITCrashMetaApplicationLog];
   
-  if (self.delegate != nil && [self.delegate respondsToSelector:@selector(attachmentForCrashManager:)]) {
+  if ([self.delegate respondsToSelector:@selector(attachmentForCrashManager:)]) {
     BITHockeyAttachment *attachment = [self.delegate attachmentForCrashManager:self];
     
     if (attachment && attachment.hockeyAttachmentData) {
@@ -721,7 +783,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
 - (BOOL)handleUserInput:(BITCrashManagerUserInput)userInput withUserProvidedMetaData:(BITCrashMetaData *)userProvidedMetaData {
   switch (userInput) {
     case BITCrashManagerUserInputDontSend:
-      if (self.delegate != nil && [self.delegate respondsToSelector:@selector(crashManagerWillCancelSendingCrashReport:)]) {
+      if ([self.delegate respondsToSelector:@selector(crashManagerWillCancelSendingCrashReport:)]) {
         [self.delegate crashManagerWillCancelSendingCrashReport:self];
       }
       
@@ -734,6 +796,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       if (userProvidedMetaData)
         [self persistUserProvidedMetaData:userProvidedMetaData];
       
+      [self approveLatestCrashReport];
       [self sendNextCrashReport];
       return YES;
       
@@ -741,13 +804,14 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       _crashManagerStatus = BITCrashManagerStatusAutoSend;
       [[NSUserDefaults standardUserDefaults] setInteger:_crashManagerStatus forKey:kBITCrashManagerStatus];
       [[NSUserDefaults standardUserDefaults] synchronize];
-      if (self.delegate != nil && [self.delegate respondsToSelector:@selector(crashManagerWillSendCrashReportsAlways:)]) {
+      if ([self.delegate respondsToSelector:@selector(crashManagerWillSendCrashReportsAlways:)]) {
         [self.delegate crashManagerWillSendCrashReportsAlways:self];
       }
       
       if (userProvidedMetaData)
         [self persistUserProvidedMetaData:userProvidedMetaData];
       
+      [self approveLatestCrashReport];
       [self sendNextCrashReport];
       return YES;
       
@@ -808,7 +872,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
           incidentIdentifier = (NSString *) CFBridgingRelease(CFUUIDCreateString(NULL, report.uuidRef));
         }
         
-        NSString *reporterKey = bit_appAnonID() ?: @"";
+        NSString *reporterKey = bit_appAnonID(NO) ?: @"";
 
         _lastSessionCrashDetails = [[BITCrashDetails alloc] initWithIncidentIdentifier:incidentIdentifier
                                                                            reporterKey:reporterKey
@@ -819,7 +883,9 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
                                                                              crashTime:appCrashTime
                                                                              osVersion:report.systemInfo.operatingSystemVersion
                                                                                osBuild:report.systemInfo.operatingSystemBuild
+                                                                            appVersion:report.applicationInfo.applicationMarketingVersion
                                                                               appBuild:report.applicationInfo.applicationVersion
+                                                                  appProcessIdentifier:report.processInfo.processID
                                     ];
 
         // fetch and store the meta data after setting _lastSessionCrashDetails, so the property can be used in the protocol methods
@@ -893,7 +959,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     return YES;
   } else {
     if (_didCrashInLastSession) {
-      if (self.delegate != nil && [self.delegate respondsToSelector:@selector(crashManagerWillCancelSendingCrashReport:)]) {
+      if ([self.delegate respondsToSelector:@selector(crashManagerWillCancelSendingCrashReport:)]) {
         [self.delegate crashManagerWillCancelSendingCrashReport:self];
       }
 
@@ -906,6 +972,12 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
 
 
 #pragma mark - Crash Report Processing
+
+// store the latest crash report as user approved, so if it fails it will retry automatically
+- (void)approveLatestCrashReport {
+  [_approvedCrashReports setObject:[NSNumber numberWithBool:YES] forKey:[_crashesDir stringByAppendingPathComponent: _lastCrashFilename]];
+  [self saveSettings];
+}
 
 - (void)triggerDelayedProcessing {
   [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(invokeDelayedProcessing) object:nil];
@@ -920,10 +992,12 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
  * - Send pending approved crash reports
  */
 - (void)invokeDelayedProcessing {
+#if !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions)
   if (!bit_isRunningInAppExtension() &&
       [[UIApplication sharedApplication] applicationState] != UIApplicationStateActive) {
     return;
   }
+#endif
   
   BITHockeyLog(@"INFO: Start delayed CrashManager processing");
   
@@ -950,10 +1024,14 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     }
 
     if (!BITHockeyBundle() || bit_isRunningInAppExtension()) {
+      [self approveLatestCrashReport];
       [self sendNextCrashReport];
+      
+#if !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions)
+
     } else if (_crashManagerStatus != BITCrashManagerStatusAutoSend && notApprovedReportFilename) {
       
-      if (self.delegate != nil && [self.delegate respondsToSelector:@selector(crashManagerWillShowSubmitCrashReportAlert:)]) {
+      if ([self.delegate respondsToSelector:@selector(crashManagerWillShowSubmitCrashReportAlert:)]) {
         [self.delegate crashManagerWillShowSubmitCrashReportAlert:self];
       }
       
@@ -974,19 +1052,70 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       if (_alertViewHandler) {
         _alertViewHandler();
       } else {
-        UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:[NSString stringWithFormat:BITHockeyLocalizedString(@"CrashDataFoundTitle"), appName]
-                                                            message:alertDescription
-                                                           delegate:self
-                                                  cancelButtonTitle:BITHockeyLocalizedString(@"CrashDontSendReport")
-                                                  otherButtonTitles:BITHockeyLocalizedString(@"CrashSendReport"), nil];
-        
-        if (self.shouldShowAlwaysButton) {
-          [alertView addButtonWithTitle:BITHockeyLocalizedString(@"CrashSendReportAlways")];
-        }
-        
-        [alertView show];
+        /* We won't use this for now until we have a more robust solution for displaying UIAlertController
+        // requires iOS 8
+        id uialertcontrollerClass = NSClassFromString(@"UIAlertController");
+        if (uialertcontrollerClass) {
+          __weak typeof(self) weakSelf = self;
+          
+          UIAlertController *alertController = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:BITHockeyLocalizedString(@"CrashDataFoundTitle"), appName]
+                                                                                   message:alertDescription
+                                                                            preferredStyle:UIAlertControllerStyleAlert];
+          
+          
+          UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:BITHockeyLocalizedString(@"CrashDontSendReport")
+                                                                 style:UIAlertActionStyleCancel
+                                                               handler:^(UIAlertAction * action) {
+                                                                 typeof(self) strongSelf = weakSelf;
+                                                                 
+                                                                 [strongSelf handleUserInput:BITCrashManagerUserInputDontSend withUserProvidedMetaData:nil];
+                                                               }];
+          
+          [alertController addAction:cancelAction];
+          
+          UIAlertAction *sendAction = [UIAlertAction actionWithTitle:BITHockeyLocalizedString(@"CrashSendReport")
+                                                               style:UIAlertActionStyleDefault
+                                                             handler:^(UIAlertAction * action) {
+                                                               typeof(self) strongSelf = weakSelf;
+                                                               [strongSelf handleUserInput:BITCrashManagerUserInputSend withUserProvidedMetaData:nil];
+                                                             }];
+          
+          [alertController addAction:sendAction];
+          
+          if (self.shouldShowAlwaysButton) {
+            UIAlertAction *alwaysSendAction = [UIAlertAction actionWithTitle:BITHockeyLocalizedString(@"CrashSendReportAlways")
+                                                                       style:UIAlertActionStyleDefault
+                                                                     handler:^(UIAlertAction * action) {
+                                                                       typeof(self) strongSelf = weakSelf;
+                                                                       [strongSelf handleUserInput:BITCrashManagerUserInputAlwaysSend withUserProvidedMetaData:nil];
+                                                                     }];
+            
+            [alertController addAction:alwaysSendAction];
+          }
+          
+          [self showAlertController:alertController];
+        } else {
+         */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+          UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:[NSString stringWithFormat:BITHockeyLocalizedString(@"CrashDataFoundTitle"), appName]
+                                                              message:alertDescription
+                                                             delegate:self
+                                                    cancelButtonTitle:BITHockeyLocalizedString(@"CrashDontSendReport")
+                                                    otherButtonTitles:BITHockeyLocalizedString(@"CrashSendReport"), nil];
+          
+          if (self.shouldShowAlwaysButton) {
+            [alertView addButtonWithTitle:BITHockeyLocalizedString(@"CrashSendReportAlways")];
+          }
+          
+          [alertView show];
+#pragma clang diagnostic pop
+        /*}*/
       }
+#endif /* !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions) */
+      
     } else {
+      [self approveLatestCrashReport];
       [self sendNextCrashReport];
     }
   }
@@ -1033,7 +1162,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       // We only check for this if we are not in the App Store environment
       
       BOOL debuggerIsAttached = NO;
-      if (![self isAppStoreEnvironment]) {
+      if (self.appEnvironment != BITEnvironmentAppStore) {
         if ([self isDebuggerAttached]) {
           debuggerIsAttached = YES;
           NSLog(@"[HockeySDK] WARNING: Detecting crashes is NOT enabled due to running the app with a debugger attached.");
@@ -1080,6 +1209,9 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
           // this should never happen, theoretically only if NSSetUncaugtExceptionHandler() has some internal issues
           NSLog(@"[HockeySDK] ERROR: Exception handler could not be set. Make sure there is no other exception handler set up!");
         }
+        
+        // Add the C++ uncaught exception handler, which is currently not handled by PLCrashReporter internally
+        [BITCrashUncaughtCXXExceptionHandlerManager addCXXExceptionHandler:uncaught_cxx_exception_handler];
       }
       _isSetup = YES;
     });
@@ -1097,8 +1229,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     if (!didAppSwitchToBackgroundSafely) {
       BOOL considerReport = YES;
       
-      if (self.delegate &&
-          [self.delegate respondsToSelector:@selector(considerAppNotTerminatedCleanlyReportForCrashManager:)]) {
+      if ([self.delegate respondsToSelector:@selector(considerAppNotTerminatedCleanlyReportForCrashManager:)]) {
         considerReport = [self.delegate considerAppNotTerminatedCleanlyReportForCrashManager:self];
       }
       
@@ -1110,9 +1241,13 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     }
   }
   
+#if !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions)
   if ([[UIApplication sharedApplication] applicationState] == UIApplicationStateActive) {
     [self appEnteredForeground];
   }
+#else
+  [self appEnteredForeground];
+#endif
   
   [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kBITAppDidReceiveLowMemoryNotification];
   [[NSUserDefaults standardUserDefaults] synchronize];
@@ -1125,13 +1260,16 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
  */
 - (void)createCrashReportForAppKill {
   NSString *fakeReportUUID = bit_UUID();
-  NSString *fakeReporterKey = bit_appAnonID() ?: @"???";
+  NSString *fakeReporterKey = bit_appAnonID(NO) ?: @"???";
   
+  NSString *fakeReportAppMarketingVersion = [[NSUserDefaults standardUserDefaults] objectForKey:kBITAppMarketingVersion];
+
   NSString *fakeReportAppVersion = [[NSUserDefaults standardUserDefaults] objectForKey:kBITAppVersion];
   if (!fakeReportAppVersion)
     return;
   
   NSString *fakeReportOSVersion = [[NSUserDefaults standardUserDefaults] objectForKey:kBITAppOSVersion] ?: [[UIDevice currentDevice] systemVersion];
+  
   NSString *fakeReportOSVersionString = fakeReportOSVersion;
   NSString *fakeReportOSBuild = [[NSUserDefaults standardUserDefaults] objectForKey:kBITAppOSBuild] ?: [self osBuild];
   if (fakeReportOSBuild) {
@@ -1150,7 +1288,10 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   [fakeReportString appendFormat:@"CrashReporter Key:   %@\n", fakeReporterKey];
   [fakeReportString appendFormat:@"Hardware Model:      %@\n", fakeReportDeviceModel];
   [fakeReportString appendFormat:@"Identifier:      %@\n", fakeReportAppBundleIdentifier];
-  [fakeReportString appendFormat:@"Version:         %@\n", fakeReportAppVersion];
+  
+  NSString *fakeReportAppVersionString = fakeReportAppMarketingVersion ? [NSString stringWithFormat:@"%@ (%@)", fakeReportAppMarketingVersion, fakeReportAppVersion] : fakeReportAppVersion;
+
+  [fakeReportString appendFormat:@"Version:         %@\n", fakeReportAppVersionString];
   [fakeReportString appendString:@"Code Type:       ARM\n"];
   [fakeReportString appendString:@"\n"];
   
@@ -1182,6 +1323,8 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   
   NSMutableDictionary *rootObj = [NSMutableDictionary dictionaryWithCapacity:2];
   [rootObj setObject:fakeReportUUID forKey:kBITFakeCrashUUID];
+  if (fakeReportAppMarketingVersion)
+    [rootObj setObject:fakeReportAppMarketingVersion forKey:kBITFakeCrashAppMarketingVersion];
   [rootObj setObject:fakeReportAppVersion forKey:kBITFakeCrashAppVersion];
   [rootObj setObject:fakeReportAppBundleIdentifier forKey:kBITFakeCrashAppBundleIdentifier];
   [rootObj setObject:fakeReportOSVersion forKey:kBITFakeCrashOSVersion];
@@ -1198,7 +1341,9 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
                                                                        crashTime:nil
                                                                        osVersion:fakeReportOSVersion
                                                                          osBuild:fakeReportOSBuild
+                                                                      appVersion:fakeReportAppMarketingVersion
                                                                         appBuild:fakeReportAppVersion
+                                                            appProcessIdentifier:[[NSProcessInfo processInfo] processIdentifier]
                               ];
 
   NSData *plist = [NSPropertyListSerialization dataWithPropertyList:(id)rootObj
@@ -1230,6 +1375,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   NSString *crashXML = nil;
   BITHockeyAttachment *attachment = nil;
   
+  // we start sending always with the oldest pending one
   NSString *filename = [_crashFiles objectAtIndex:0];
   NSString *cacheFilename = [filename lastPathComponent];
   NSData *crashData = [NSData dataWithContentsOfFile:filename];
@@ -1240,6 +1386,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
     NSString *installString = nil;
     NSString *crashLogString = nil;
     NSString *appBundleIdentifier = nil;
+    NSString *appBundleMarketingVersion = nil;
     NSString *appBundleVersion = nil;
     NSString *osVersion = nil;
     NSString *deviceModel = nil;
@@ -1258,6 +1405,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       crashLogString = [fakeReportDict objectForKey:kBITFakeCrashReport];
       crashUUID = [fakeReportDict objectForKey:kBITFakeCrashUUID];
       appBundleIdentifier = [fakeReportDict objectForKey:kBITFakeCrashAppBundleIdentifier];
+      appBundleMarketingVersion = [fakeReportDict objectForKey:kBITFakeCrashAppMarketingVersion] ?: @"";
       appBundleVersion = [fakeReportDict objectForKey:kBITFakeCrashAppVersion];
       appBinaryUUIDs = [fakeReportDict objectForKey:kBITFakeCrashAppBinaryUUID];
       deviceModel = [fakeReportDict objectForKey:kBITFakeCrashDeviceModel];
@@ -1281,7 +1429,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       return;
     }
     
-    installString = bit_appAnonID() ?: @"";
+    installString = bit_appAnonID(NO) ?: @"";
     
     if (report) {
       if (report.uuidRef != NULL) {
@@ -1290,6 +1438,7 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       metaFilename = [cacheFilename stringByAppendingPathExtension:@"meta"];
       crashLogString = [BITCrashReportTextFormatter stringValueForCrashReport:report crashReporterKey:installString];
       appBundleIdentifier = report.applicationInfo.applicationIdentifier;
+      appBundleMarketingVersion = report.applicationInfo.applicationMarketingVersion ?: @"";
       appBundleVersion = report.applicationInfo.applicationVersion;
       osVersion = report.systemInfo.operatingSystemVersion;
       deviceModel = [self getDevicePlatform];
@@ -1335,13 +1484,14 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       }
     }
     
-    crashXML = [NSString stringWithFormat:@"<crashes><crash><applicationname><![CDATA[%@]]></applicationname><uuids>%@</uuids><bundleidentifier>%@</bundleidentifier><systemversion>%@</systemversion><platform>%@</platform><senderversion>%@</senderversion><version>%@</version><uuid>%@</uuid><log><![CDATA[%@]]></log><userid>%@</userid><username>%@</username><contact>%@</contact><installstring>%@</installstring><description><![CDATA[%@]]></description></crash></crashes>",
+    crashXML = [NSString stringWithFormat:@"<crashes><crash><applicationname><![CDATA[%@]]></applicationname><uuids>%@</uuids><bundleidentifier>%@</bundleidentifier><systemversion>%@</systemversion><platform>%@</platform><senderversion>%@</senderversion><versionstring>%@</versionstring><version>%@</version><uuid>%@</uuid><log><![CDATA[%@]]></log><userid>%@</userid><username>%@</username><contact>%@</contact><installstring>%@</installstring><description><![CDATA[%@]]></description></crash></crashes>",
                 [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleExecutable"],
                 appBinaryUUIDs,
                 appBundleIdentifier,
                 osVersion,
                 deviceModel,
                 [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"],
+                appBundleMarketingVersion,
                 appBundleVersion,
                 crashUUID,
                 [crashLogString stringByReplacingOccurrencesOfString:@"]]>" withString:@"]]" @"]]><![CDATA[" @">" options:NSLiteralSearch range:NSMakeRange(0,crashLogString.length)],
@@ -1351,11 +1501,6 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
                 installString,
                 [description stringByReplacingOccurrencesOfString:@"]]>" withString:@"]]" @"]]><![CDATA[" @">" options:NSLiteralSearch range:NSMakeRange(0,description.length)]];
     
-    // store this crash report as user approved, so if it fails it will retry automatically
-    [_approvedCrashReports setObject:[NSNumber numberWithBool:YES] forKey:filename];
-
-    [self saveSettings];
-    
     BITHockeyLog(@"INFO: Sending crash reports:\n%@", crashXML);
     [self sendCrashReportWithFilename:filename xml:crashXML attachment:attachment];
   } else {
@@ -1364,9 +1509,12 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   }
 }
 
+#if !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions)
 
 #pragma mark - UIAlertView Delegate
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 - (void)alertView:(UIAlertView *)alertView didDismissWithButtonIndex:(NSInteger)buttonIndex {
   switch (buttonIndex) {
     case 0:
@@ -1380,29 +1528,17 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
       break;
   }
 }
+#pragma clang diagnostic pop
 
-
+#endif /* !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions) */
 
 
 #pragma mark - Networking
 
-- (NSURLRequest *)requestWithXML:(NSString*)xml attachment:(BITHockeyAttachment *)attachment {
-  NSString *postCrashPath = [NSString stringWithFormat:@"api/2/apps/%@/crashes", self.encodedAppIdentifier];
-  
-  NSMutableURLRequest *request = [self.hockeyAppClient requestWithMethod:@"POST"
-                                                                    path:postCrashPath
-                                                              parameters:nil];
-  
-  [request setCachePolicy: NSURLRequestReloadIgnoringLocalCacheData];
-  [request setValue:@"HockeySDK/iOS" forHTTPHeaderField:@"User-Agent"];
-  [request setValue:@"gzip" forHTTPHeaderField:@"Accept-Encoding"];
-
-  NSString *boundary = @"----FOO";
-  NSString *contentType = [NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary];
-  [request setValue:contentType forHTTPHeaderField:@"Content-type"];
-	
+- (NSData *)postBodyWithXML:(NSString *)xml attachment:(BITHockeyAttachment *)attachment boundary:(NSString *)boundary {
   NSMutableData *postBody =  [NSMutableData data];
   
+//  [postBody appendData:[[NSString stringWithFormat:@"\r\n"] dataUsingEncoding:NSUTF8StringEncoding]];
   [postBody appendData:[BITHockeyAppClient dataWithPostValue:BITHOCKEY_NAME
                                                       forKey:@"sdk"
                                                     boundary:boundary]];
@@ -1435,9 +1571,84 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
   
   [postBody appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
   
-  [request setHTTPBody:postBody];
+  return postBody;
+}
+
+- (NSMutableURLRequest *)requestWithBoundary:(NSString *)boundary {
+  NSString *postCrashPath = [NSString stringWithFormat:@"api/2/apps/%@/crashes", self.encodedAppIdentifier];
   
+  NSMutableURLRequest *request = [self.hockeyAppClient requestWithMethod:@"POST"
+                                                                    path:postCrashPath
+                                                              parameters:nil];
+  
+  [request setCachePolicy: NSURLRequestReloadIgnoringLocalCacheData];
+  [request setValue:@"HockeySDK/iOS" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"gzip" forHTTPHeaderField:@"Accept-Encoding"];
+  
+  NSString *contentType = [NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary];
+  [request setValue:contentType forHTTPHeaderField:@"Content-type"];
+
   return request;
+}
+
+// process upload response
+- (void)processUploadResultWithFilename:(NSString *)filename responseData:(NSData *)responseData statusCode:(NSInteger)statusCode error:(NSError *)error {
+  __block NSError *theError = error;
+  
+  dispatch_async(dispatch_get_main_queue(), ^{
+    _sendingInProgress = NO;
+    
+    if (nil == theError) {
+      if (nil == responseData || [responseData length] == 0) {
+        theError = [NSError errorWithDomain:kBITCrashErrorDomain
+                                       code:BITCrashAPIReceivedEmptyResponse
+                                   userInfo:@{
+                                              NSLocalizedDescriptionKey: @"Sending failed with an empty response!"
+                                              }
+                    ];
+      } else if (statusCode >= 200 && statusCode < 400) {
+        [self cleanCrashReportWithFilename:filename];
+        
+        // HockeyApp uses PList XML format
+        NSMutableDictionary *response = [NSPropertyListSerialization propertyListWithData:responseData
+                                                                                  options:NSPropertyListMutableContainersAndLeaves
+                                                                                   format:nil
+                                                                                    error:&theError];
+        BITHockeyLog(@"INFO: Received API response: %@", response);
+        
+        if ([self.delegate respondsToSelector:@selector(crashManagerDidFinishSendingCrashReport:)]) {
+          [self.delegate crashManagerDidFinishSendingCrashReport:self];
+        }
+        
+        // only if sending the crash report went successfully, continue with the next one (if there are more)
+        [self sendNextCrashReport];
+      } else if (statusCode == 400) {
+        [self cleanCrashReportWithFilename:filename];
+        
+        theError = [NSError errorWithDomain:kBITCrashErrorDomain
+                                       code:BITCrashAPIAppVersionRejected
+                                   userInfo:@{
+                                              NSLocalizedDescriptionKey: @"The server rejected receiving crash reports for this app version!"
+                                              }
+                    ];
+      } else {
+        theError = [NSError errorWithDomain:kBITCrashErrorDomain
+                                       code:BITCrashAPIErrorWithStatusCode
+                                   userInfo:@{
+                                              NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Sending failed with status code: %li", (long)statusCode]
+                                              }
+                    ];
+      }
+    }
+    
+    if (theError) {
+      if ([self.delegate respondsToSelector:@selector(crashManager:didFailWithError:)]) {
+        [self.delegate crashManager:self didFailWithError:theError];
+      }
+      
+      BITHockeyLog(@"ERROR: %@", [theError localizedDescription]);
+    }
+  });
 }
 
 /**
@@ -1448,81 +1659,57 @@ static PLCrashReporterCallbacks plCrashCallbacks = {
  *	@param	xml	The XML data that needs to be send to the server
  */
 - (void)sendCrashReportWithFilename:(NSString *)filename xml:(NSString*)xml attachment:(BITHockeyAttachment *)attachment {
+  BOOL sendingWithURLSession = NO;
   
-  NSURLRequest* request = [self requestWithXML:xml attachment:attachment];
-  
-  __weak typeof (self) weakSelf = self;
-  BITHTTPOperation *operation = [self.hockeyAppClient
-                                 operationWithURLRequest:request
-                                 completion:^(BITHTTPOperation *operation, NSData* responseData, NSError *error) {
-                                   typeof (self) strongSelf = weakSelf;
-                                   
-                                   _sendingInProgress = NO;
-                                   
-                                   NSInteger statusCode = [operation.response statusCode];
+  id nsurlsessionClass = NSClassFromString(@"NSURLSessionUploadTask");
+  if (nsurlsessionClass && !bit_isRunningInAppExtension()) {
+    NSURLSessionConfiguration *sessionConfiguration = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:sessionConfiguration];
+    
+    NSURLRequest *request = [self requestWithBoundary:kBITHockeyAppClientBoundary];
+    NSData *data = [self postBodyWithXML:xml attachment:attachment boundary:kBITHockeyAppClientBoundary];
 
-                                   if (nil == error) {
-                                     if (nil == responseData || [responseData length] == 0) {
-                                       error = [NSError errorWithDomain:kBITCrashErrorDomain
-                                                                   code:BITCrashAPIReceivedEmptyResponse
-                                                               userInfo:@{
-                                                                          NSLocalizedDescriptionKey: @"Sending failed with an empty response!"
-                                                                          }
-                                                ];
-                                     } else if (statusCode >= 200 && statusCode < 400) {
-                                       [strongSelf cleanCrashReportWithFilename:filename];
-                                       
-                                       // HockeyApp uses PList XML format
-                                       NSMutableDictionary *response = [NSPropertyListSerialization propertyListWithData:responseData
-                                                                                                                 options:NSPropertyListMutableContainersAndLeaves
-                                                                                                                  format:nil
-                                                                                                                   error:&error];
-                                       BITHockeyLog(@"INFO: Received API response: %@", response);
-                                       
-                                       if (strongSelf.delegate != nil &&
-                                           [strongSelf.delegate respondsToSelector:@selector(crashManagerDidFinishSendingCrashReport:)]) {
-                                         [strongSelf.delegate crashManagerDidFinishSendingCrashReport:self];
-                                       }
-                                       
-                                       // only if sending the crash report went successfully, continue with the next one (if there are more)
-                                       [strongSelf sendNextCrashReport];
-                                     } else if (statusCode == 400) {
-                                       [strongSelf cleanCrashReportWithFilename:filename];
-                                       
-                                       error = [NSError errorWithDomain:kBITCrashErrorDomain
-                                                                   code:BITCrashAPIAppVersionRejected
-                                                               userInfo:@{
-                                                                          NSLocalizedDescriptionKey: @"The server rejected receiving crash reports for this app version!"
-                                                                          }
-                                                ];
-                                     } else {
-                                       error = [NSError errorWithDomain:kBITCrashErrorDomain
-                                                                   code:BITCrashAPIErrorWithStatusCode
-                                                               userInfo:@{
-                                                                          NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Sending failed with status code: %li", (long)statusCode]
-                                                                          }
-                                                ];
-                                     }
-                                   }
-                                   
-                                   if (error) {
-                                     if (strongSelf.delegate != nil &&
-                                         [strongSelf.delegate respondsToSelector:@selector(crashManager:didFailWithError:)]) {
-                                       [strongSelf.delegate crashManager:self didFailWithError:error];
-                                     }
-                                     
-                                     BITHockeyLog(@"ERROR: %@", [error localizedDescription]);
-                                   }
-                                   
-                                 }];
+    if (request && data) {
+      __weak typeof (self) weakSelf = self;
+      NSURLSessionUploadTask *uploadTask = [session uploadTaskWithRequest:request
+                                                                 fromData:data
+                                                        completionHandler:^(NSData *responseData, NSURLResponse *response, NSError *error) {
+                                                          typeof (self) strongSelf = weakSelf;
+                                                          
+                                                          NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse*) response;
+                                                          NSInteger statusCode = [httpResponse statusCode];
+                                                          [strongSelf processUploadResultWithFilename:filename responseData:responseData statusCode:statusCode error:error];
+                                                        }];
+      
+      [uploadTask resume];
+      sendingWithURLSession = YES;
+    }
+  }
   
-  if (self.delegate != nil && [self.delegate respondsToSelector:@selector(crashManagerWillSendCrashReport:)]) {
+  if (!sendingWithURLSession) {
+    NSMutableURLRequest *request = [self requestWithBoundary:kBITHockeyAppClientBoundary];
+    
+    NSData *postBody = [self postBodyWithXML:xml attachment:attachment boundary:kBITHockeyAppClientBoundary];
+    [request setHTTPBody:postBody];
+    
+    __weak typeof (self) weakSelf = self;
+    BITHTTPOperation *operation = [self.hockeyAppClient
+                                   operationWithURLRequest:request
+                                   completion:^(BITHTTPOperation *operation, NSData* responseData, NSError *error) {
+                                     typeof (self) strongSelf = weakSelf;
+                                     
+                                     NSInteger statusCode = [operation.response statusCode];
+                                     [strongSelf processUploadResultWithFilename:filename responseData:responseData statusCode:statusCode error:error];
+                                   }];
+    
+    [self.hockeyAppClient enqeueHTTPOperation:operation];
+  }
+  
+  if ([self.delegate respondsToSelector:@selector(crashManagerWillSendCrashReport:)]) {
     [self.delegate crashManagerWillSendCrashReport:self];
   }
   
   BITHockeyLog(@"INFO: Sending crash reports started.");
-
-  [self.hockeyAppClient enqeueHTTPOperation:operation];
 }
 
 - (NSTimeInterval)timeintervalCrashInLastSessionOccured {

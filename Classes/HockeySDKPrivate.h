@@ -67,7 +67,7 @@
 #define BITHOCKEYSDK_BUNDLE @"HockeySDKResources.bundle"
 #define BITHOCKEYSDK_URL @"https://sdk.hockeyapp.net/"
 
-#define BITHockeyLog(fmt, ...) do { if([BITHockeyManager sharedHockeyManager].isDebugLogEnabled && ![BITHockeyManager sharedHockeyManager].isAppStoreEnvironment) { NSLog((@"[HockeySDK] %s/%d " fmt), __PRETTY_FUNCTION__, __LINE__, ##__VA_ARGS__); }} while(0)
+#define BITHockeyLog(fmt, ...) do { if([BITHockeyManager sharedHockeyManager].isDebugLogEnabled && ([BITHockeyManager sharedHockeyManager].appEnvironment != BITEnvironmentAppStore)) { NSLog((@"[HockeySDK] %s/%d " fmt), __PRETTY_FUNCTION__, __LINE__, ##__VA_ARGS__); }} while(0)
 
 #define BIT_RGBCOLOR(r,g,b) [UIColor colorWithRed:(r)/255.0 green:(g)/255.0 blue:(b)/255.0 alpha:1]
 
@@ -79,21 +79,6 @@ NSString *BITHockeyMD5(NSString *str);
 #define __IPHONE_8_0     80000
 #endif
 
-#ifdef __IPHONE_6_0
-
-#define kBITTextLabelAlignmentCenter        NSTextAlignmentCenter
-#define kBITTextLabelAlignmentLeft          NSTextAlignmentLeft
-#define kBITTextLabelAlignmentRight         NSTextAlignmentRight
-#define kBITLineBreakModeMiddleTruncation   NSLineBreakByTruncatingMiddle
-
-#else
-
-#define kBITTextLabelAlignmentCenter        UITextAlignmentCenter
-#define kBITTextLabelAlignmentLeft          UITextAlignmentLeft
-#define kBITTextLabelAlignmentRight         UITextAlignmentRight
-#define kBITLineBreakModeMiddleTruncation   UILineBreakModeMiddleTruncation
-
-#endif /* __IPHONE_6_0 */
 
 #if __IPHONE_OS_VERSION_MIN_REQUIRED > __IPHONE_6_1
 
@@ -105,4 +90,4 @@ NSString *BITHockeyMD5(NSString *str);
 
 #endif
 
-#endif //HockeySDK_HockeySDKPrivate_h
+#endif /* HockeySDK_HockeySDKPrivate_h */
