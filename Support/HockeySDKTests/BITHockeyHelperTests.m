@@ -33,12 +33,21 @@
 
 - (void)tearDown {
   // Tear-down code here.
-# pragma clang diagnostic push
-# pragma clang diagnostic ignored "-Wimplicit"
-  __gcov_flush();
-# pragma clang diagnostic pop
-  
   [super tearDown];
+}
+
+- (void)testURLEncodedString {
+  assertThat(bit_URLEncodedString(@"123 {Test, b0c10b1}"), equalTo(@"123%20%7BTest%2C%20b0c10b1%7D"));
+  assertThat(bit_URLEncodedString(@"7902c5a8ecee4b17a758880253090569"), equalTo(@"7902c5a8ecee4b17a758880253090569"));
+  assertThat(bit_URLEncodedString(@"udid"), equalTo(@"udid"));
+  assertThat(bit_URLEncodedString(@"983024C8-A861-4649-89BC-4D92896269A4"), equalTo(@"983024C8-A861-4649-89BC-4D92896269A4"));
+  assertThat(bit_URLEncodedString(@"16"), equalTo(@"16"));
+  assertThat(bit_URLEncodedString(@"9.0"), equalTo(@"9.0"));
+  assertThat(bit_URLEncodedString(@"x86_64"), equalTo(@"x86_64"));
+  assertThat(bit_URLEncodedString(@"en"), equalTo(@"en"));
+  assertThat(bit_URLEncodedString(@"09/10/2015"), equalTo(@"09%2F10%2F2015"));
+  assertThat(bit_URLEncodedString(@"https://sdk.hockeyapp.net/api/2/apps/fd51a3647d651add2171dd59d3b6e5ec/app_versions/21?format=plist&udid=82610469-C064-412D-AEAC-F453EB506726"), equalTo(@"https%3A%2F%2Fsdk.hockeyapp.net%2Fapi%2F2%2Fapps%2Ffd51a3647d651add2171dd59d3b6e5ec%2Fapp_versions%2F21%3Fformat%3Dplist%26udid%3D82610469-C064-412D-AEAC-F453EB506726"));
+  assertThat(bit_URLEncodedString(@"net.hockeyapp.sdk"), equalTo(@"net.hockeyapp.sdk"));
 }
 
 - (void)testValidateEmail {
@@ -46,24 +55,24 @@
   
   // valid email
   result = bit_validateEmail(@"mail@test.com");
-  assertThatBool(result, equalToBool(YES));
+  assertThatBool(result, isTrue());
   
   // invalid emails
   
   result = bit_validateEmail(@"mail@test");
-  assertThatBool(result, equalToBool(NO));
+  assertThatBool(result, isFalse());
 
   result = bit_validateEmail(@"mail@.com");
-  assertThatBool(result, equalToBool(NO));
+  assertThatBool(result, isFalse());
 
   result = bit_validateEmail(@"mail.com");
-  assertThatBool(result, equalToBool(NO));
+  assertThatBool(result, isFalse());
 
 }
 
 - (void)testAppName {
   NSString *resultString = bit_appName(@"Placeholder");
-  assertThatBool([resultString isEqualToString:@"Placeholder"], equalToBool(YES));
+  assertThatBool([resultString isEqualToString:@"Placeholder"], isTrue());
 }
 
 - (void)testUUIDPreiOS6 {
@@ -85,7 +94,7 @@
                            andServiceName:bit_keychainHockeySDKServiceName()
                                     error:&error];
   
-  NSString *resultString = bit_appAnonID();
+  NSString *resultString = bit_appAnonID(NO);
   assertThat(resultString, notNilValue());
   assertThatInteger([resultString length], equalToInteger(36));
 }

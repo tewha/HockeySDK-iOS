@@ -27,6 +27,10 @@
  */
 
 
+#import "HockeySDK.h"
+
+#if HOCKEYSDK_FEATURE_FEEDBACK
+
 #import "BITFeedbackMessageAttachment.h"
 #import "BITHockeyHelper.h"
 #import "HockeySDKPrivate.h"
@@ -103,7 +107,7 @@
     return self.internalData;
   }
   
-  return nil;
+  return [NSData data];
 }
 
 - (void)replaceData:(NSData *)data {
@@ -124,7 +128,7 @@
     return [NSURL fileURLWithPath:self.filename];
   }
   
-  return nil;
+  return [NSURL URLWithString:@""];
 }
 
 
@@ -256,3 +260,5 @@
 }
 
 @end
+
+#endif /* HOCKEYSDK_FEATURE_FEEDBACK */

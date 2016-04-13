@@ -36,16 +36,11 @@
 
   BITHockeyManager *hm = [BITHockeyManager sharedHockeyManager];
   hm.delegate = nil;
-  _sut = [[BITFeedbackManager alloc] initWithAppIdentifier:nil isAppStoreEnvironment:NO];
+  _sut = [[BITFeedbackManager alloc] initWithAppIdentifier:nil appEnvironment:BITEnvironmentOther];
   _sut.delegate = nil;
 }
 
 - (void)tearDown {
-# pragma clang diagnostic push
-# pragma clang diagnostic ignored "-Wimplicit"
-  __gcov_flush();
-# pragma clang diagnostic pop
- 
   [_sut removeKeyFromKeychain:kBITHockeyMetaUserID];
   [_sut removeKeyFromKeychain:kBITHockeyMetaUserName];
   [_sut removeKeyFromKeychain:kBITHockeyMetaUserEmail];
@@ -74,7 +69,7 @@
   
   BOOL dataAvailable = [_sut updateUserIDUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(NO));
+  assertThatBool(dataAvailable, isFalse());
   assertThat(_sut.userID, nilValue());
   
   [verifyCount(delegateMock, times(1)) userIDForHockeyManager:hm componentManager:_sut];
@@ -89,7 +84,7 @@
   
   BOOL dataAvailable = [_sut updateUserIDUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userID, equalTo(@"test"));
   
   [verifyCount(classMock, times(1)) userIDForHockeyManager:hm componentManager:_sut];
@@ -100,7 +95,7 @@
   
   BOOL dataAvailable = [_sut updateUserIDUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userID, equalTo(@"test"));
 }
 
@@ -110,7 +105,7 @@
   
   BOOL dataAvailable = [_sut updateUserIDUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userID, equalTo(@"test"));
 }
 
@@ -123,7 +118,7 @@
   
   BOOL dataAvailable = [_sut updateUserNameUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(NO));
+  assertThatBool(dataAvailable, isFalse());
   assertThat(_sut.userName, nilValue());
   
   [verifyCount(delegateMock, times(1)) userNameForHockeyManager:hm componentManager:_sut];
@@ -138,7 +133,7 @@
   
   BOOL dataAvailable = [_sut updateUserNameUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userName, equalTo(@"test"));
   
   [verifyCount(classMock, times(1)) userNameForHockeyManager:hm componentManager:_sut];
@@ -149,7 +144,7 @@
   
   BOOL dataAvailable = [_sut updateUserNameUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userName, equalTo(@"test"));
 }
 
@@ -159,7 +154,7 @@
   
   BOOL dataAvailable = [_sut updateUserNameUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userName, equalTo(@"test"));
 }
 
@@ -172,7 +167,7 @@
   
   BOOL dataAvailable = [_sut updateUserEmailUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(NO));
+  assertThatBool(dataAvailable, isFalse());
   assertThat(_sut.userEmail, nilValue());
   
   [verifyCount(delegateMock, times(1)) userEmailForHockeyManager:hm componentManager:_sut];
@@ -187,7 +182,7 @@
   
   BOOL dataAvailable = [_sut updateUserEmailUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userEmail, equalTo(@"test"));
   
   [verifyCount(classMock, times(1)) userEmailForHockeyManager:hm componentManager:_sut];
@@ -198,7 +193,7 @@
   
   BOOL dataAvailable = [_sut updateUserEmailUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userEmail, equalTo(@"test"));
 }
 
@@ -208,9 +203,30 @@
   
   BOOL dataAvailable = [_sut updateUserEmailUsingKeychainAndDelegate];
   
-  assertThatBool(dataAvailable, equalToBool(YES));
+  assertThatBool(dataAvailable, isTrue());
   assertThat(_sut.userEmail, equalTo(@"test"));
 }
 
+- (void)testAllowFetchingNewMessages {
+    BOOL fetchMessages = NO;
+
+    // check the default
+    fetchMessages = [_sut allowFetchingNewMessages];
+    
+    assertThatBool(fetchMessages, isTrue());
+    
+    // check the delegate is implemented and returns NO
+    BITHockeyManager *hm = [BITHockeyManager sharedHockeyManager];
+    NSObject <BITHockeyManagerDelegate> *classMock = mockObjectAndProtocol([NSObject class], @protocol(BITHockeyManagerDelegate));
+    [given([classMock allowAutomaticFetchingForNewFeedbackForManager:_sut]) willReturn:@NO];
+    hm.delegate = classMock;
+    _sut.delegate = classMock;
+    
+    fetchMessages = [_sut allowFetchingNewMessages];
+    
+    assertThatBool(fetchMessages, isFalse());
+    
+    [verifyCount(classMock, times(1)) allowAutomaticFetchingForNewFeedbackForManager:_sut];
+}
 
 @end

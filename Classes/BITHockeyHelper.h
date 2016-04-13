@@ -28,11 +28,13 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import "HockeySDKEnums.h"
 
-/* NSString helpers */
-NSString *bit_URLEncodedString(NSString *inputString);
-NSString *bit_URLDecodedString(NSString *inputString);
-NSString *bit_base64String(NSData * data, unsigned long length);
+@interface BITHockeyHelper : NSObject
+
++ (BOOL)isURLSessionSupported;
+
+@end
 
 NSString *bit_settingsDir(void);
 
@@ -45,11 +47,20 @@ NSString *bit_encodeAppIdentifier(NSString *inputString);
 NSString *bit_appName(NSString *placeHolderString);
 NSString *bit_UUIDPreiOS6(void);
 NSString *bit_UUID(void);
-NSString *bit_appAnonID(void);
+NSString *bit_appAnonID(BOOL forceNewAnonID);
 BOOL bit_isPreiOS7Environment(void);
 BOOL bit_isPreiOS8Environment(void);
+BOOL bit_isAppStoreReceiptSandbox(void);
+BOOL bit_hasEmbeddedMobileProvision(void);
+BITEnvironment bit_currentAppEnvironment(void);
 BOOL bit_isRunningInAppExtension(void);
 
+/* NSString helpers */
+NSString *bit_URLEncodedString(NSString *inputString);
+NSString *bit_base64String(NSData * data, unsigned long length);
+
+#if !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnly) && !defined (HOCKEYSDK_CONFIGURATION_ReleaseCrashOnlyExtensions)
+/* AppIcon helper */
 NSString *bit_validAppIconStringFromIcons(NSBundle *resourceBundle, NSArray *icons);
 NSString *bit_validAppIconFilename(NSBundle *bundle, NSBundle *resourceBundle);
 
@@ -63,3 +74,4 @@ UIImage *bit_imageWithContentsOfResolutionIndependentFile(NSString * path);
 UIImage *bit_imageNamed(NSString *imageName, NSString *bundleName);
 UIImage *bit_screenshot(void);
 UIImage *bit_appIcon(void);
+#endif

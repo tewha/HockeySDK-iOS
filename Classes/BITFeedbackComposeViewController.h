@@ -59,7 +59,7 @@
  The delegate is automatically set by using `[BITHockeyManager setDelegate:]`. You
  should not need to set this delegate individually.
  
- @see `[BITHockeyManager setDelegate:`]
+ @see [BITHockeyManager setDelegate:]
  */
 @property (nonatomic, weak) id<BITFeedbackComposeViewControllerDelegate> delegate;
 
@@ -68,6 +68,14 @@
 /// @name Presetting content
 ///-----------------------------------------------------------------------------
 
+
+/**
+ Don't show the option to add images from the photo library
+ 
+ This is helpful if your application is landscape only, since the system UI for
+ selecting an image from the photo library is portrait only
+ */
+@property (nonatomic) BOOL hideImageAttachmentButton;
 
 /**
  An array of data objects that should be used to prefill the compose view content

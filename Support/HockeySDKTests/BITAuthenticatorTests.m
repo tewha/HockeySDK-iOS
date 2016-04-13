@@ -7,6 +7,7 @@
 //
 
 #import <XCTest/XCTest.h>
+#import <OCMock/OCMock.h>
 
 #define HC_SHORTHAND
 #import <OCHamcrestIOS/OCHamcrestIOS.h>
@@ -15,8 +16,10 @@
 #import <OCMockitoIOS/OCMockitoIOS.h>
 
 #import "HockeySDK.h"
-#import "BITAuthenticator.h"
+#import "HockeySDKPrivate.h"
+#import "BITHockeyHelper.h"
 #import "BITAuthenticator_Private.h"
+#import "BITHockeyBaseManagerPrivate.h"
 #import "BITHTTPOperation.h"
 #import "BITTestHelper.h"
 #import "BITHockeyAppClient.h"
@@ -56,15 +59,10 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 - (void)setUp {
   [super setUp];
   
-  _sut = [[BITAuthenticator alloc] initWithAppIdentifier:nil isAppStoreEnvironment:NO];
+  _sut = [[BITAuthenticator alloc] initWithAppIdentifier:nil appEnvironment:BITEnvironmentOther];
 }
 
 - (void)tearDown {
-# pragma clang diagnostic push
-# pragma clang diagnostic ignored "-Wimplicit"
-  __gcov_flush();
-# pragma clang diagnostic pop
-  
   [_sut cleanupInternalStorage];
   _sut = nil;
   
@@ -90,7 +88,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 #pragma mark - Persistence Tests
 - (void) testThatLastAuthenticatedVersionIsPersisted {
   _sut.lastAuthenticatedVersion = @"1.2.1";
-  _sut = [[BITAuthenticator alloc] initWithAppIdentifier:nil isAppStoreEnvironment:YES];
+  _sut = [[BITAuthenticator alloc] initWithAppIdentifier:nil appEnvironment:BITEnvironmentAppStore];
   assertThat(_sut.lastAuthenticatedVersion, equalTo(@"1.2.1"));
 }
 
@@ -105,9 +103,9 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 
 #pragma mark - Initial defaults
 - (void) testDefaultValues {
-  assertThatBool(_sut.restrictApplicationUsage, equalToBool(NO));
-  assertThatBool(_sut.isIdentified, equalToBool(NO));
-  assertThatBool(_sut.isValidated, equalToBool(NO));
+  assertThatBool(_sut.restrictApplicationUsage, isFalse());
+  assertThatBool(_sut.isIdentified, isFalse());
+  assertThatBool(_sut.isValidated, isFalse());
   assertThat(_sut.authenticationSecret, equalTo(nil));
   assertThat(_sut.installationIdentifier, equalTo(nil));
   assertThat(_sut.installationIdentifierParameterString, equalTo(@"uuid"));
@@ -129,7 +127,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 - (void) testThatChangingIdentificationTypeResetsIdentifiedFlag {
   _sut.identified = YES;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppUser;
-  assertThatBool(_sut.identified, equalToBool(NO));
+  assertThatBool(_sut.identified, isFalse());
 }
 
 - (void) testThatAfterChangingIdentificationTypeIdentificationIsRedone {
@@ -137,7 +135,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
   _sut.identified = YES;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppUser;
   [_sut identifyWithCompletion:nil];
-  assertThatBool(_sut.identified, equalToBool(NO));
+  assertThatBool(_sut.identified, isFalse());
   assertThat(_sut.installationIdentifier, nilValue());
 }
 
@@ -158,24 +156,24 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 #pragma mark - Anonymous identification type
 - (void) testAnonymousIdentification {
   _sut.identificationType = BITAuthenticatorIdentificationTypeAnonymous;
-  assertThatBool(_sut.isIdentified, equalToBool(NO));
+  assertThatBool(_sut.isIdentified, isFalse());
   [_sut identifyWithCompletion:^(BOOL identified, NSError *error) {
-    assertThatBool(identified, equalToBool(YES));
+    assertThatBool(identified, isTrue());
     assertThat(error, equalTo(nil));
   }];
-  assertThatBool(_sut.isIdentified, equalToBool(YES));
+  assertThatBool(_sut.isIdentified, isTrue());
   assertThat(_sut.installationIdentifier, notNilValue());
 }
 
 //anoynmous users can't be validated
 - (void) testAnonymousValidation {
   _sut.identificationType = BITAuthenticatorIdentificationTypeAnonymous;
-  assertThatBool(_sut.isValidated, equalToBool(NO));
+  assertThatBool(_sut.isValidated, isFalse());
   [_sut validateWithCompletion:^(BOOL validated, NSError *error) {
-    assertThatBool(_sut.validated, equalToBool(NO));
+    assertThatBool(_sut.validated, isFalse());
     assertThat(error, notNilValue());
   }];
-  assertThatBool(_sut.isValidated, equalToBool(NO));
+  assertThatBool(_sut.isValidated, isFalse());
 }
 
 #pragma mark - Device identification type
@@ -203,7 +201,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 - (void) testEmailIdentificationFailsWithMissingSecret {
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppEmail;
   [_sut identifyWithCompletion:^(BOOL identified, NSError *error) {
-    assertThatBool(identified, equalToBool(NO));
+    assertThatBool(identified, isFalse());
     assertThat(error, notNilValue());
   }];
 }
@@ -222,21 +220,23 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 - (void) testEmailValidationFailsWithMissingSecret {
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppEmail;
   [_sut validateWithCompletion:^(BOOL validated, NSError *error) {
-    assertThatBool(validated, equalToBool(NO));
+    assertThatBool(validated, isFalse());
     assertThat(error, notNilValue());
   }];
 }
 
 - (void) testThatEmailIdentificationQueuesAnOperation {
+  id helperMock = OCMClassMock([BITHockeyHelper class]);
+  OCMStub([helperMock isURLSessionSupported]).andReturn(NO);
+  
   id httpClientMock = mock(BITHockeyAppClient.class);
   _sut.hockeyAppClient = httpClientMock;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppEmail;
   [_sut storeInstallationIdentifier:@"meh" withType:BITAuthenticatorIdentificationTypeHockeyAppEmail];
   _sut.authenticationSecret = @"double";
-  [_sut authenticationViewController:nil
-       handleAuthenticationWithEmail:@"stephan@dd.de"
-                            password:@"nopass"
-                          completion:nil];
+  
+  [_sut authenticationViewController:nil handleAuthenticationWithEmail:@"stephan@dd.de" request:[NSURLRequest new] completion:nil];
+  
   [verify(httpClientMock) enqeueHTTPOperation:anything()];
 }
 
@@ -257,12 +257,14 @@ static void *kInstallationIdentification = &kInstallationIdentification;
   _sut.identified = NO;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppUser;
   [_sut validateWithCompletion:^(BOOL validated, NSError *error) {
-    assertThatBool(validated, equalToBool(NO));
+    assertThatBool(validated, isFalse());
     assertThatLong(error.code, equalToLong(BITAuthenticatorNotIdentified));
   }];
 }
 
 - (void) testThatValidationCreatesAGETRequest {
+  id helperMock = OCMClassMock([BITHockeyHelper class]);
+  OCMStub([helperMock isURLSessionSupported]).andReturn(NO);
   id httpClientMock = mock(BITHockeyAppClient.class);
   _sut.hockeyAppClient = httpClientMock;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppEmail;
@@ -276,15 +278,16 @@ static void *kInstallationIdentification = &kInstallationIdentification;
 
 #pragma mark - Authentication
 - (void) testThatEnabledRestrictionTriggersValidation {
-  id clientMock = mock(BITHockeyAppClient.class);
-  _sut.hockeyAppClient = clientMock;
+  id mockAuthenticator = OCMPartialMock(_sut);
   _sut.authenticationSecret = @"sekret";
   _sut.restrictApplicationUsage = YES;
   _sut.identificationType = BITAuthenticatorIdentificationTypeHockeyAppEmail;
   [_sut storeInstallationIdentifier:@"asd" withType:BITAuthenticatorIdentificationTypeHockeyAppEmail];
-  [_sut authenticate];
   
-  [verify(clientMock) getPath:(id)anything() parameters:(id)anything() completion:(id)anything()];
+  
+  OCMExpect([mockAuthenticator validateWithCompletion:(id)anything()]);
+  [_sut authenticate];
+  OCMVerifyAll(mockAuthenticator);
 }
 
 - (void) testThatDisabledRestrictionDoesntTriggerValidation {
@@ -318,7 +321,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
   _sut.identificationType = BITAuthenticatorIdentificationTypeDevice;
   _sut.validated = YES;
   _sut.lastAuthenticatedVersion = @"111xxx";
-  assertThatBool(_sut.needsValidation, equalToBool(YES));
+  assertThatBool(_sut.needsValidation, isTrue());
 }
 
 - (void) testThatValidationDoesNotTriggerOnSameVersion {
@@ -326,7 +329,7 @@ static void *kInstallationIdentification = &kInstallationIdentification;
   _sut.restrictionEnforcementFrequency = BITAuthenticatorAppRestrictionEnforcementOnFirstLaunch;
   _sut.validated = YES;
   _sut.lastAuthenticatedVersion = _sut.executableUUID;
-  assertThatBool(_sut.needsValidation, equalToBool(NO));
+  assertThatBool(_sut.needsValidation, isFalse());
 }
 
 @end
